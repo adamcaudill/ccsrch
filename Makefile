@@ -22,12 +22,12 @@
 # Makefile for ccsrch
 #
 
-CC	?= gcc
-INCL	= -I./
-OBJS=  ccsrch.o
-LIBSDIR	=  -L./
+CC      = gcc
+INCL    =
+OBJS    = ccsrch.o
+LIBSDIR	= -L./
 LIBS	= 
-PROGS	=ccsrch
+PROGS	= ccsrch
 
 #this hack is to support OSX
 UNAME := $(shell uname)
@@ -35,8 +35,8 @@ ifeq ($(UNAME), Darwin)
   CFLAGS	=-O2
   LDFLAGS	=
 else
-  CFLAGS	=-O2 -static
-  LDFLAGS	=-s
+  CFLAGS	=-O2
+  LDFLAGS	=
 endif
 
 strict: CFLAGS += -pedantic -Wall -Werror
@@ -44,12 +44,12 @@ strict: CFLAGS += -pedantic -Wall -Werror
 all:	${PROGS}
 
 ccsrch:	${OBJS}
-	${CC} ${CFLAGS} ${INCL} ${LDFLAGS} ${OBJS} ${LIBSDIR} ${LIBS} -o ccsrch
+	${CC} ${CFLAGS} ${INCL} ${LDFLAGS} ${OBJS} ${LIBSDIR} ${LIBS} -o ${PROGS}
 
 strict:	${PROGS}
 
 clean:
-	rm -f core *.core ${PROGS} ${OBJS} ccsrch.exe
+	rm -f core *.core ${PROGS} ${OBJS}
 
 .c.o:
 	${CC} ${CFLAGS} ${INCL} -c $<
