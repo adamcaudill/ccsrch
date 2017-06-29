@@ -46,6 +46,7 @@
 #define BSIZE       4096
 #define CARDTYPELEN   64
 #define CARDSIZE      17
+#define CARDSIZEMIN   13
 
 static const int CCSRCH_EXIT_FAILURE = -1;
 static const int CCSRCH_EXIT_SUCCESS = 0;
@@ -453,7 +454,6 @@ static int ccsrch(const char *filename)
   int   k              = 0;
   int   counter        = 0;
   int   total          = 0;
-  int   check          = 0;
   int   limit_exceeded = 0;
 
 #ifdef DEBUG
@@ -480,14 +480,16 @@ static int ccsrch(const char *filename)
   initialize_buffer();
 
   while (limit_exceeded == 0) {
-    memset(&ccsrch_buf, '\0', BSIZE);
     cnt = fread(&ccsrch_buf, 1, BSIZE - 1, in);
     if (cnt <= 0) {
+      ccsrch_buf[0] = '\0';
       if (ferror(in)) {
         fprintf(stderr, "ccsrch: error reading file %s; errno=%d\n", filename, errno);
       }
       break;
     }
+
+    ccsrch_buf[cnt] = '\0';
 
     if (limit_ascii && !is_ascii_buf(ccsrch_buf, cnt))
       break;
@@ -495,27 +497,12 @@ static int ccsrch(const char *filename)
     for (ccsrch_index=0; ccsrch_index<cnt && limit_exceeded==0; ccsrch_index++) {
       /* check to see if our data is 0...9 (based on ACSII value) */
       if (isdigit(ccsrch_buf[ccsrch_index])) {
-        check = 1;
         cardbuf[counter] = ((int)ccsrch_buf[ccsrch_index])-'0';
         counter++;
-      } else if ((ccsrch_buf[ccsrch_index] == 0) || (wrap && ccsrch_buf[ccsrch_index] == '\r') ||
-      	   (wrap && ccsrch_buf[ccsrch_index] == '\n') || (ccsrch_buf[ccsrch_index] == '-')) {
-        /*
-         * we consider dashes, nulls, new lines, and carriage
-         * returns to be noise, so ingore those
-         */
-         ignore_count += 1;
-        check = 0;
-      } else {
-        check = 0;
-        initialize_buffer();
-        counter      = 0;
-        ignore_count = 0;
-      }
 
-      if (((counter > 12) && (counter < CARDSIZE)) && (check)) {
+      if ((counter >= CARDSIZEMIN) && (counter < CARDSIZE)) {
         luhn_check(counter, byte_offset-counter);
-      } else if ((counter == CARDSIZE) && (check)) {
+      } else if (counter == CARDSIZE) {
         for (k=0; k<counter-1; k++) {
           cardbuf[k] = cardbuf[k + 1];
         }
@@ -526,6 +513,20 @@ static int ccsrch(const char *filename)
         luhn_check(16,byte_offset-16);
         counter--;
       }
+
+      } else if ((ccsrch_buf[ccsrch_index] == 0) || (wrap && ccsrch_buf[ccsrch_index] == '\r') ||
+      	   (wrap && ccsrch_buf[ccsrch_index] == '\n') || (ccsrch_buf[ccsrch_index] == '-')) {
+        /*
+         * we consider dashes, nulls, new lines, and carriage
+         * returns to be noise, so ingore those
+         */
+         ignore_count += 1;
+      } else {
+        initialize_buffer();
+        counter      = 0;
+        ignore_count = 0;
+      }
+
       byte_offset++;
 
       if (newstatus == 1)
@@ -626,7 +627,6 @@ static int proc_dir_list(const char *instr)
   char           *curr_path    = NULL;
   struct stat     fstat;
   int             err          = 0;
-  char            tmpbuf[BSIZE];
 
   if (instr == NULL)
     return 1;
@@ -673,9 +673,7 @@ static int proc_dir_list(const char *instr)
     if ((fstat.st_mode & S_IFMT) == S_IFDIR) {
       snprintf(curr_path+strlen(curr_path), MAXPATH-strlen(curr_path), "/");
       proc_dir_list(curr_path);
-    } else if ((fstat.st_size > 0) && ((fstat.st_mode & S_IFMT) == S_IFREG)) {
-      memset(&tmpbuf, '\0', BSIZE);
-
+    } else if ((fstat.st_size >= CARDSIZEMIN) && ((fstat.st_mode & S_IFMT) == S_IFREG)) {
       /* rest file_hit_count so we can keep track of many hits each file has */
       file_hit_count = 0;
 
@@ -818,7 +816,6 @@ int main(int argc, char *argv[])
   char       *inputstr      = NULL;
   char       *inbuf         = NULL;
   char       *tracktype_str = NULL;
-  char        tmpbuf[BSIZE];
   int         err            = 0;
   int         c              = 0;
   int         limit_arg      = 0;
@@ -950,8 +947,7 @@ int main(int argc, char *argv[])
         exit(CCSRCH_EXIT_FAILURE);
       }
   
-      if ((ffstat.st_size > 0) && ((ffstat.st_mode & S_IFMT) == S_IFREG)) {
-        memset(&tmpbuf, '\0', BSIZE);
+      if ((ffstat.st_size >= CARDSIZEMIN) && ((ffstat.st_mode & S_IFMT) == S_IFREG)) {
         if (logfilename != NULL) {
           if (strstr(inbuf, logfilename) != NULL) {
             fprintf(stderr, "main: We seem to be hitting our log file, so we'll leave this out of the search -> %s\n", inbuf);
