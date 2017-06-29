@@ -39,6 +39,10 @@
   #define SIGQUIT 3
 #endif
 
+#if defined(__unix__) || defined(__OSX__)
+  #define SUPPORT_SKIP_SYMLINKS
+#endif
+
 #define PROG_VER "ccsrch 1.0.9 (c) 2012-2016 Adam Caudill <adam@adamcaudill.com>\n             (c) 2007 Mike Beekey <zaphod2718@yahoo.com>"
 
 #define MDBUFSIZE    512
@@ -84,6 +88,7 @@ static int    mask_card_number     = 0;
 static int    limit_ascii          = 0;
 static int    ignore_count         = 0;
 static int    wrap                 = 0;
+static int    skip_symlinks        = 0;
 
 static void initialize_buffer()
 {
@@ -557,7 +562,14 @@ static int get_file_stat(const char *inputfile, struct stat *fileattr)
     exit(CCSRCH_EXIT_FAILURE);
   }
 
-  err = stat(tmp2buf, fileattr);
+  if (skip_symlinks == 0) {
+    err = stat(tmp2buf, fileattr);
+  } else {
+#ifdef SUPPORT_SKIP_SYMLINKS
+    err = lstat(tmp2buf, fileattr);
+#endif
+  }
+
   free(tmp2buf);
 
   if (err != 0) {
@@ -568,6 +580,7 @@ static int get_file_stat(const char *inputfile, struct stat *fileattr)
     }
     return -1;
   }
+
   currfile_atime=fileattr->st_atime;
   currfile_mtime=fileattr->st_mtime;
   currfile_ctime=fileattr->st_ctime;
@@ -601,6 +614,7 @@ static int is_allowed_file_type(const char *name)
     fprintf(stderr, "is_allowed_file_type: can't allocate memory; errno=%d\n", errno);
     exit(CCSRCH_EXIT_FAILURE);
   }
+
   ext     = get_filename_ext(fname);
   stolower(ext);
   if (ext != NULL && ext[0] != '\0') {
@@ -747,6 +761,9 @@ static void usage(const char *progname)
   printf("    -n <list>      File extensions to exclude (i.e .dll,.exe)\n");
   printf("    -m\t\t   Mask the PAN number.\n");
   printf("    -w\t\t   Check for card matches wrapped across lines.\n");
+#ifdef SUPPORT_SKIP_SYMLINKS
+  printf("    -L\t\t   Do not follow symbolic links.\n");
+#endif
   printf("    -h\t\t   Usage information\n\n");
   printf("See https://github.com/adamcaudill/ccsrch for more information.\n\n");
   exit(CCSRCH_EXIT_SUCCESS);
@@ -824,7 +841,7 @@ int main(int argc, char *argv[])
   if (argc < 2)
     usage(argv[0]);
 
-  while ((c = getopt(argc, argv,"abefi:jt:To:cml:n:sw")) != -1) {
+  while ((c = getopt(argc, argv,"abefi:jt:To:cml:n:swL")) != -1) {
       switch (c) {
         case 'a':
           limit_ascii = 1;
@@ -882,11 +899,17 @@ int main(int argc, char *argv[])
         	break;
         case 's':
         	newstatus = 1;
-
         	break;
         case 'w':
         	wrap = 1;
         	break;
+        case 'L':
+#ifdef SUPPORT_SKIP_SYMLINKS
+          skip_symlinks = 1;
+#else
+          usage(argv[0]);
+#endif
+          break;
         case 'h':
         default:
           usage(argv[0]);
