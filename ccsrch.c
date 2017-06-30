@@ -39,6 +39,10 @@
   #define SIGQUIT 3
 #endif
 
+#if defined(__unix__) || defined(__OSX__)
+  #define SUPPORT_SKIP_SYMLINKS
+#endif
+
 #define PROG_VER "ccsrch 1.0.9 (c) 2012-2016 Adam Caudill <adam@adamcaudill.com>\n             (c) 2007 Mike Beekey <zaphod2718@yahoo.com>"
 
 #define MDBUFSIZE    512
@@ -46,6 +50,10 @@
 #define BSIZE       4096
 #define CARDTYPELEN   64
 #define CARDSIZE      17
+#define CARDSIZEMIN   13
+
+static const int CCSRCH_EXIT_FAILURE = -1;
+static const int CCSRCH_EXIT_SUCCESS = 0;
 
 static char   ccsrch_buf[BSIZE];
 static char   lastfilename[MAXPATH];
@@ -80,6 +88,8 @@ static int    mask_card_number     = 0;
 static int    limit_ascii          = 0;
 static int    ignore_count         = 0;
 static int    wrap                 = 0;
+static int    skip_symlinks        = 0;
+static int    no_circular_search   = 0;
 
 static void initialize_buffer()
 {
@@ -144,8 +154,8 @@ static void print_result(const char *cardname, int cardlen, long byte_offset)
   int   char_before = ccsrch_index - cardlen - ignore_count;
 
   /* If char directly before or after card are a number, don't print */
-  if ((char_before >= 0 && isdigit(ccsrch_buf[char_before])) ||
-      isdigit(ccsrch_buf[ccsrch_index+1]))
+  if (no_circular_search == 1 && ((char_before >= 0 && isdigit(ccsrch_buf[char_before])) ||
+      isdigit(ccsrch_buf[ccsrch_index+1])))
     return;
 
   memset(&nbuf, '\0', sizeof(nbuf));
@@ -362,7 +372,7 @@ static int luhn_check(int len, long offset)
 
   memset(num, 0, CARDSIZE);
 
-  for (i=0; i<len; i++)
+  for (i=0; i<len+1; i++)
    num[i]=cardbuf[i];
 
   for (i=len-2; i>=0; i-=2) {
@@ -407,7 +417,7 @@ static char *stolower(char *buf)
   return buf;
 }
 
-static void update_status(const char *filename, int position)
+static void update_status(const char *filename, long position)
 {
   struct tm *current;
   time_t     now;
@@ -429,7 +439,7 @@ static void update_status(const char *filename, int position)
       fn++;
     }
 
-    status_msglength = snprintf(msgbuffer, MDBUFSIZE, "[%02i:%02i:%02i File: %s - Processed: %iMB]\r",
+    status_msglength = snprintf(msgbuffer, MDBUFSIZE, "[%02i:%02i:%02i File: %s - Processed: %ldMB]\r",
       current->tm_hour, current->tm_min, current->tm_sec,
       fn,
       (position / 1024) / 1024);
@@ -450,7 +460,6 @@ static int ccsrch(const char *filename)
   int   k              = 0;
   int   counter        = 0;
   int   total          = 0;
-  int   check          = 0;
   int   limit_exceeded = 0;
 
 #ifdef DEBUG
@@ -477,10 +486,16 @@ static int ccsrch(const char *filename)
   initialize_buffer();
 
   while (limit_exceeded == 0) {
-    memset(&ccsrch_buf, '\0', BSIZE);
     cnt = fread(&ccsrch_buf, 1, BSIZE - 1, in);
-    if (cnt <= 0)
+    if (cnt <= 0) {
+      ccsrch_buf[0] = '\0';
+      if (ferror(in)) {
+        fprintf(stderr, "ccsrch: error reading file %s; errno=%d\n", filename, errno);
+      }
       break;
+    }
+
+    ccsrch_buf[cnt] = '\0';
 
     if (limit_ascii && !is_ascii_buf(ccsrch_buf, cnt))
       break;
@@ -488,9 +503,29 @@ static int ccsrch(const char *filename)
     for (ccsrch_index=0; ccsrch_index<cnt && limit_exceeded==0; ccsrch_index++) {
       /* check to see if our data is 0...9 (based on ACSII value) */
       if (isdigit(ccsrch_buf[ccsrch_index])) {
-        check = 1;
         cardbuf[counter] = ((int)ccsrch_buf[ccsrch_index])-'0';
         counter++;
+
+        if ((counter >= CARDSIZEMIN) && (counter < CARDSIZE)) {
+          luhn_check(counter, byte_offset-counter);
+        } else if (counter == CARDSIZE) {
+          if (no_circular_search == 0) {
+            for (k=0; k<counter-1; k++) {
+              cardbuf[k] = cardbuf[k + 1];
+            }
+            cardbuf[k] = -1;
+            luhn_check(13,byte_offset-13);
+            luhn_check(14,byte_offset-14);
+            luhn_check(15,byte_offset-15);
+            luhn_check(16,byte_offset-16);
+            counter--;
+          } else {
+            initialize_buffer();
+            counter      = 1;
+            ignore_count = 0;
+            cardbuf[0] = ((int)ccsrch_buf[ccsrch_index])-'0';
+          }
+        }
       } else if ((ccsrch_buf[ccsrch_index] == 0) || (wrap && ccsrch_buf[ccsrch_index] == '\r') ||
       	   (wrap && ccsrch_buf[ccsrch_index] == '\n') || (ccsrch_buf[ccsrch_index] == '-')) {
         /*
@@ -498,27 +533,12 @@ static int ccsrch(const char *filename)
          * returns to be noise, so ingore those
          */
          ignore_count += 1;
-        check = 0;
       } else {
-        check = 0;
         initialize_buffer();
         counter      = 0;
         ignore_count = 0;
       }
 
-      if (((counter > 12) && (counter < CARDSIZE)) && (check)) {
-        luhn_check(counter, byte_offset-counter);
-      } else if ((counter == CARDSIZE) && (check)) {
-        for (k=0; k<counter-1; k++) {
-          cardbuf[k] = cardbuf[k + 1];
-        }
-        cardbuf[k] = -1;
-        luhn_check(13,byte_offset-13);
-        luhn_check(14,byte_offset-14);
-        luhn_check(15,byte_offset-15);
-        luhn_check(16,byte_offset-16);
-        counter--;
-      }
       byte_offset++;
 
       if (newstatus == 1)
@@ -532,45 +552,11 @@ static int ccsrch(const char *filename)
 
   fclose(in);
 
+  fflush(NULL);
+
   return total;
 }
 
-static int escape_space(const char *infile, char *outfile)
-{
-  int    i       = 0;
-  int    spc     = 0;
-  char   *tmpbuf = NULL;
-  int    filelen = 0;
-  int    newlen  = 0;
-  int    newpos  = 0;
-
-  filelen = strlen(infile);
-  for (i=0; i<filelen; i++) {
-    if (infile[i] == ' ')
-      spc++;
-  }
-
-  newlen = filelen + spc + 1;
-  tmpbuf = (char *)malloc(newlen);
-  if (tmpbuf == NULL) {
-    fprintf(stderr, "escape_space: can't allocate memory; errno=%d\n", errno);
-    return 1;
-  }
-  memset(tmpbuf, '\0', newlen);
-
-  for (i=0; i<filelen; i++) {
-    if (infile[i] == ' ') {
-      tmpbuf[newpos++] = '\\';
-      tmpbuf[newpos] = infile[i];
-    } else {
-      tmpbuf[newpos] = infile[i];
-    }
-    newpos++;
-  }
-  snprintf(outfile, newlen, "%s", tmpbuf);
-  free(tmpbuf);
-  return 0;
-}
 
 static int get_file_stat(const char *inputfile, struct stat *fileattr)
 {
@@ -580,23 +566,31 @@ static int get_file_stat(const char *inputfile, struct stat *fileattr)
   tmp2buf = strdup(inputfile);
   if (tmp2buf == NULL) {
     fprintf(stderr, "get_file_stat: can't allocate memory; errno=%d\n", errno);
-    return 1;
+    exit(CCSRCH_EXIT_FAILURE);
   }
 
-  err = stat(tmp2buf, fileattr);
+  if (skip_symlinks == 0) {
+    err = stat(tmp2buf, fileattr);
+  } else {
+#ifdef SUPPORT_SKIP_SYMLINKS
+    err = lstat(tmp2buf, fileattr);
+#endif
+  }
+
+  free(tmp2buf);
+
   if (err != 0) {
     if (errno == ENOENT) {
       fprintf(stderr, "get_file_stat: File %s not found, can't get stat info\n", inputfile);
     } else {
       fprintf(stderr, "get_file_stat: Cannot stat file %s; errno=%d\n", inputfile, errno);
     }
-    free(tmp2buf);
     return -1;
   }
+
   currfile_atime=fileattr->st_atime;
   currfile_mtime=fileattr->st_mtime;
   currfile_ctime=fileattr->st_ctime;
-  free(tmp2buf);
   return 0;
 }
 
@@ -623,8 +617,10 @@ static int is_allowed_file_type(const char *name)
 
   exclude = strdup(exclude_extensions);
   fname   = strdup(name);
-  if (exclude == NULL || fname == NULL)
-    return 0;
+  if (exclude == NULL || fname == NULL) {
+    fprintf(stderr, "is_allowed_file_type: can't allocate memory; errno=%d\n", errno);
+    exit(CCSRCH_EXIT_FAILURE);
+  }
 
   ext     = get_filename_ext(fname);
   stolower(ext);
@@ -652,7 +648,6 @@ static int proc_dir_list(const char *instr)
   char           *curr_path    = NULL;
   struct stat     fstat;
   int             err          = 0;
-  char            tmpbuf[BSIZE];
 
   if (instr == NULL)
     return 1;
@@ -672,7 +667,7 @@ static int proc_dir_list(const char *instr)
   if (curr_path == NULL) {
     fprintf(stderr, "proc_dir_list: Can't allocate enough space; errno=%d\n", errno);
     closedir(dirptr);
-    return 1;
+    exit(CCSRCH_EXIT_FAILURE);
   }
   snprintf(curr_path, MAXPATH, "%s", instr);
 
@@ -699,28 +694,25 @@ static int proc_dir_list(const char *instr)
     if ((fstat.st_mode & S_IFMT) == S_IFDIR) {
       snprintf(curr_path+strlen(curr_path), MAXPATH-strlen(curr_path), "/");
       proc_dir_list(curr_path);
-    } else if ((fstat.st_size > 0) && ((fstat.st_mode & S_IFMT) == S_IFREG)) {
-      memset(&tmpbuf, '\0', BSIZE);
-      if (escape_space(curr_path, tmpbuf) == 0) {
-        /* rest file_hit_count so we can keep track of many hits each file has */
-        file_hit_count = 0;
+    } else if ((fstat.st_size >= CARDSIZEMIN) && ((fstat.st_mode & S_IFMT) == S_IFREG)) {
+      /* rest file_hit_count so we can keep track of many hits each file has */
+      file_hit_count = 0;
 
-        if (is_allowed_file_type(curr_path) == 0) {
-	        /*
-	         * kludge, need to clean this up
-	         * later else any string matching in the path returns non NULL
-	         */
-	        if (logfilename != NULL) {
-	          if (strstr(curr_path, logfilename) != NULL) {
-	            fprintf(stderr, "We seem to be hitting our log file, so we'll leave this out of the search -> %s\n", curr_path);
-            } else {
-	            ccsrch(curr_path);
-	            if (file_hit_count > 0 && print_file_hit_count == 1)
-	              printf("%s: %d hits\n", curr_path, file_hit_count);
-	          }
-	        } else {
-	          ccsrch(curr_path);
-	        }
+      if (is_allowed_file_type(curr_path) == 0) {
+        /*
+         * kludge, need to clean this up
+         * later else any string matching in the path returns non NULL
+         */
+        if (logfilename != NULL) {
+          if (strstr(curr_path, logfilename) != NULL) {
+            fprintf(stderr, "We seem to be hitting our log file, so we'll leave this out of the search -> %s\n", curr_path);
+          } else {
+            ccsrch(curr_path);
+            if (file_hit_count > 0 && print_file_hit_count == 1)
+              printf("%s: %d hits\n", curr_path, file_hit_count);
+          }
+        } else {
+          ccsrch(curr_path);
         }
       }
     }
@@ -736,7 +728,7 @@ static void cleanup_shtuff()
 {
   time_t end_time = time(NULL);
   printf("\n\nFiles searched ->\t\t%ld\n", file_count);
-  printf("Search time (seconds) ->\t%ld\n", ((int)time(NULL) - init_time));
+  printf("Search time (seconds) ->\t%ld\n", (long)((int)time(NULL) - init_time));
   printf("Credit card matches->\t\t%ld\n", total_count);
   if (tracksrch)
     printf("Track data pattern matches->\t%d\n\n", trackdatacount);
@@ -745,7 +737,7 @@ static void cleanup_shtuff()
     free(ignore);
   if (logfilefd != NULL)
     fclose(logfilefd);
-  exit(0);
+  exit(CCSRCH_EXIT_SUCCESS);
 }
 
 static void signal_proc()
@@ -776,9 +768,13 @@ static void usage(const char *progname)
   printf("    -n <list>      File extensions to exclude (i.e .dll,.exe)\n");
   printf("    -m\t\t   Mask the PAN number.\n");
   printf("    -w\t\t   Check for card matches wrapped across lines.\n");
+#ifdef SUPPORT_SKIP_SYMLINKS
+  printf("    -L\t\t   Do not follow symbolic links.\n");
+#endif
+  printf("    -p\t\t   No circular search of PAN numbers when longer-than-PAN\n\t\t   digit sequences are encountered.\n");
   printf("    -h\t\t   Usage information\n\n");
   printf("See https://github.com/adamcaudill/ccsrch for more information.\n\n");
-  exit(0);
+  exit(CCSRCH_EXIT_SUCCESS);
 }
 
 static int open_logfile()
@@ -818,9 +814,11 @@ static char *read_ignore_list(const char *filename, size_t *len)
   fseek(infile, 0, SEEK_END);
   *len = ftell(infile);
   fseek(infile, 0, SEEK_SET);
-  buf = malloc(*len+1);
-  if (buf == NULL)
-    return NULL;
+  buf = (char *)malloc(*len+1);
+  if (buf == NULL) {
+    fprintf(stderr, "read_ignore_list: can't allocate memory\n");
+    exit(CCSRCH_EXIT_FAILURE);
+  }
 
   if (fread(buf, 1, *len, infile) == 0)
     fprintf(stderr, "Error with reading buf from %s\n", filename);
@@ -843,7 +841,6 @@ int main(int argc, char *argv[])
   char       *inputstr      = NULL;
   char       *inbuf         = NULL;
   char       *tracktype_str = NULL;
-  char        tmpbuf[BSIZE];
   int         err            = 0;
   int         c              = 0;
   int         limit_arg      = 0;
@@ -852,7 +849,7 @@ int main(int argc, char *argv[])
   if (argc < 2)
     usage(argv[0]);
 
-  while ((c = getopt(argc, argv,"abefi:jt:To:cml:n:sw")) != -1) {
+  while ((c = getopt(argc, argv,"abefi:jt:To:cml:n:swLp")) != -1) {
       switch (c) {
         case 'a':
           limit_ascii = 1;
@@ -910,11 +907,20 @@ int main(int argc, char *argv[])
         	break;
         case 's':
         	newstatus = 1;
-
         	break;
         case 'w':
         	wrap = 1;
         	break;
+        case 'L':
+#ifdef SUPPORT_SKIP_SYMLINKS
+          skip_symlinks = 1;
+#else
+          usage(argv[0]);
+#endif
+          break;
+        case 'p':
+          no_circular_search = 1;
+          break;
         case 'h':
         default:
           usage(argv[0]);
@@ -942,12 +948,14 @@ int main(int argc, char *argv[])
       usage(argv[0]);
   
     if (open_logfile() < 0)
-      exit(-1);
+      exit(CCSRCH_EXIT_FAILURE);
   
-    inbuf = strdup(inputstr);
+    inbuf = (char *)malloc(strlen(inputstr) + 2);
+    strcpy(inbuf, inputstr);
+
     if (inbuf == NULL) {
       fprintf(stderr, "strdup: cannot allocate memory erro=%d\n", errno);
-      cleanup_shtuff();
+      exit(CCSRCH_EXIT_FAILURE);
     }
     signal_proc();
     if (check_dir(inbuf)) {
@@ -970,27 +978,24 @@ int main(int argc, char *argv[])
         } else {
           fprintf(stderr, "Cannot stat file %s; errno=%d\n", inbuf, errno);
         }
-        exit(-1);
+        exit(CCSRCH_EXIT_FAILURE);
       }
   
-      if ((ffstat.st_size > 0) && ((ffstat.st_mode & S_IFMT) == S_IFREG)) {
-        memset(&tmpbuf, '\0', BSIZE);
-        if (escape_space(inbuf, tmpbuf) == 0) {
-          if (logfilename != NULL) {
-            if (strstr(inbuf, logfilename) != NULL) {
-              fprintf(stderr, "main: We seem to be hitting our log file, so we'll leave this out of the search -> %s\n", inbuf);
-            } else {
-#ifdef DEBUG
-              printf("Processing file %s\n",inbuf);
-#endif
-              ccsrch(inbuf);
-            }
+      if ((ffstat.st_size >= CARDSIZEMIN) && ((ffstat.st_mode & S_IFMT) == S_IFREG)) {
+        if (logfilename != NULL) {
+          if (strstr(inbuf, logfilename) != NULL) {
+            fprintf(stderr, "main: We seem to be hitting our log file, so we'll leave this out of the search -> %s\n", inbuf);
           } else {
 #ifdef DEBUG
             printf("Processing file %s\n",inbuf);
 #endif
             ccsrch(inbuf);
           }
+        } else {
+#ifdef DEBUG
+          printf("Processing file %s\n",inbuf);
+#endif
+          ccsrch(inbuf);
         }
       } else if ((ffstat.st_mode & S_IFMT) == S_IFDIR) {
 #ifdef WINDOWS
@@ -1002,11 +1007,13 @@ int main(int argc, char *argv[])
 #endif
         proc_dir_list(inbuf);
       } else {
-        fprintf(stderr, "main: Unknown mode returned-> %x\n", ffstat.st_mode);
+        fprintf(stderr, "main: Unknown mode returned for %s -> %x\n", inbuf, ffstat.st_mode);
       }
     }
+    free(inbuf);
   }
-  free(inbuf);
+
   cleanup_shtuff();
-  return 0;
+
+  return CCSRCH_EXIT_SUCCESS;
 }
