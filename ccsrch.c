@@ -89,6 +89,7 @@ static int    limit_ascii          = 0;
 static int    ignore_count         = 0;
 static int    wrap                 = 0;
 static int    skip_symlinks        = 0;
+static int    no_circular_search   = 0;
 
 static void initialize_buffer()
 {
@@ -153,8 +154,8 @@ static void print_result(const char *cardname, int cardlen, long byte_offset)
   int   char_before = ccsrch_index - cardlen - ignore_count;
 
   /* If char directly before or after card are a number, don't print */
-  if ((char_before >= 0 && isdigit(ccsrch_buf[char_before])) ||
-      isdigit(ccsrch_buf[ccsrch_index+1]))
+  if (no_circular_search == 1 && ((char_before >= 0 && isdigit(ccsrch_buf[char_before])) ||
+      isdigit(ccsrch_buf[ccsrch_index+1])))
     return;
 
   memset(&nbuf, '\0', sizeof(nbuf));
@@ -371,7 +372,7 @@ static int luhn_check(int len, long offset)
 
   memset(num, 0, CARDSIZE);
 
-  for (i=0; i<len; i++)
+  for (i=0; i<len+1; i++)
    num[i]=cardbuf[i];
 
   for (i=len-2; i>=0; i-=2) {
@@ -505,20 +506,26 @@ static int ccsrch(const char *filename)
         cardbuf[counter] = ((int)ccsrch_buf[ccsrch_index])-'0';
         counter++;
 
-      if ((counter >= CARDSIZEMIN) && (counter < CARDSIZE)) {
-        luhn_check(counter, byte_offset-counter);
-      } else if (counter == CARDSIZE) {
-        for (k=0; k<counter-1; k++) {
-          cardbuf[k] = cardbuf[k + 1];
+        if ((counter >= CARDSIZEMIN) && (counter < CARDSIZE)) {
+          luhn_check(counter, byte_offset-counter);
+        } else if (counter == CARDSIZE) {
+          if (no_circular_search == 0) {
+            for (k=0; k<counter-1; k++) {
+              cardbuf[k] = cardbuf[k + 1];
+            }
+            cardbuf[k] = -1;
+            luhn_check(13,byte_offset-13);
+            luhn_check(14,byte_offset-14);
+            luhn_check(15,byte_offset-15);
+            luhn_check(16,byte_offset-16);
+            counter--;
+          } else {
+            initialize_buffer();
+            counter      = 1;
+            ignore_count = 0;
+            cardbuf[0] = ((int)ccsrch_buf[ccsrch_index])-'0';
+          }
         }
-        cardbuf[k] = -1;
-        luhn_check(13,byte_offset-13);
-        luhn_check(14,byte_offset-14);
-        luhn_check(15,byte_offset-15);
-        luhn_check(16,byte_offset-16);
-        counter--;
-      }
-
       } else if ((ccsrch_buf[ccsrch_index] == 0) || (wrap && ccsrch_buf[ccsrch_index] == '\r') ||
       	   (wrap && ccsrch_buf[ccsrch_index] == '\n') || (ccsrch_buf[ccsrch_index] == '-')) {
         /*
@@ -764,6 +771,7 @@ static void usage(const char *progname)
 #ifdef SUPPORT_SKIP_SYMLINKS
   printf("    -L\t\t   Do not follow symbolic links.\n");
 #endif
+  printf("    -p\t\t   No circular search of PAN numbers when longer-than-PAN\n\t\t   digit sequences are encountered.\n");
   printf("    -h\t\t   Usage information\n\n");
   printf("See https://github.com/adamcaudill/ccsrch for more information.\n\n");
   exit(CCSRCH_EXIT_SUCCESS);
@@ -841,7 +849,7 @@ int main(int argc, char *argv[])
   if (argc < 2)
     usage(argv[0]);
 
-  while ((c = getopt(argc, argv,"abefi:jt:To:cml:n:swL")) != -1) {
+  while ((c = getopt(argc, argv,"abefi:jt:To:cml:n:swLp")) != -1) {
       switch (c) {
         case 'a':
           limit_ascii = 1;
@@ -909,6 +917,9 @@ int main(int argc, char *argv[])
 #else
           usage(argv[0]);
 #endif
+          break;
+        case 'p':
+          no_circular_search = 1;
           break;
         case 'h':
         default:
